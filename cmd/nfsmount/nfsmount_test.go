@@ -1,5 +1,5 @@
-//go:build darwin && !cmount
-// +build darwin,!cmount
+//go:build unix
+// +build unix
 
 package nfsmount
 
