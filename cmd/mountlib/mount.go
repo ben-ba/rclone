@@ -24,7 +24,7 @@ import (
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/rclone/rclone/vfs/vfsflags"
 
-	sysdnotify "github.com/iguanesolutions/go-systemd/v5/notify"
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -191,10 +191,10 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 			}
 
 			mnt := NewMountPoint(mount, args[1], cmd.NewFsDir(args), &Opt, &vfsflags.Opt)
-			daemon, err := mnt.Mount()
+			mountDaemon, err := mnt.Mount()
 
 			// Wait for foreground mount, if any...
-			if daemon == nil {
+			if mountDaemon == nil {
 				if err == nil {
 					err = mnt.Wait()
 				}
@@ -204,15 +204,15 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 				return
 			}
 
-			// Wait for daemon, if any...
+			// Wait for mountDaemon, if any...
 			killOnce := sync.Once{}
 			killDaemon := func(reason string) {
 				killOnce.Do(func() {
-					if err := daemon.Signal(os.Interrupt); err != nil {
-						fs.Errorf(nil, "%s. Failed to terminate daemon pid %d: %v", reason, daemon.Pid, err)
+					if err := mountDaemon.Signal(os.Interrupt); err != nil {
+						fs.Errorf(nil, "%s. Failed to terminate daemon pid %d: %v", reason, mountDaemon.Pid, err)
 						return
 					}
-					fs.Debugf(nil, "%s. Terminating daemon pid %d", reason, daemon.Pid)
+					fs.Debugf(nil, "%s. Terminating daemon pid %d", reason, mountDaemon.Pid)
 				})
 			}
 
@@ -224,9 +224,9 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 				if err != nil {
 					killDaemon("Daemon timed out")
 				} else {
-					// Double check daemon is still alive
+					// Double check mountDaemon is still alive
 					// on non Linux OSes WaitMountReady is just a no-op
-					err = daemon.Signal(syscall.Signal(0))
+					err = mountDaemon.Signal(syscall.Signal(0))
 					if err != nil {
 						err = fmt.Errorf("daemon has died: %w", err)
 					}
@@ -251,17 +251,17 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 }
 
 // Mount the remote at mountpoint
-func (m *MountPoint) Mount() (daemon *os.Process, err error) {
+func (m *MountPoint) Mount() (mountDaemon *os.Process, err error) {
 
 	// Ensure sensible defaults
 	m.SetVolumeName(m.MountOpt.VolumeName)
 	m.SetDeviceName(m.MountOpt.DeviceName)
 
-	// Start background task if --daemon is specified
+	// Start background task if --mountDaemon is specified
 	if m.MountOpt.Daemon {
-		daemon, err = daemonize.StartDaemon(os.Args)
-		if daemon != nil || err != nil {
-			return daemon, err
+		mountDaemon, err = daemonize.StartDaemon(os.Args)
+		if mountDaemon != nil || err != nil {
+			return mountDaemon, err
 		}
 	}
 
@@ -281,7 +281,7 @@ func (m *MountPoint) Wait() error {
 	var finaliseOnce sync.Once
 	finalise := func() {
 		finaliseOnce.Do(func() {
-			_ = sysdnotify.Stopping()
+			_, _ = daemon.SdNotify(false, daemon.SdNotifyStopping)
 			// Unmount only if directory was mounted by rclone, e.g. don't unmount autofs hooks.
 			if err := CheckMountReady(m.MountPoint); err != nil {
 				fs.Debugf(m.MountPoint, "Unmounted externally. Just exit now.")
@@ -298,7 +298,7 @@ func (m *MountPoint) Wait() error {
 	defer atexit.Unregister(fnHandle)
 
 	// Notify systemd
-	if err := sysdnotify.Ready(); err != nil {
+	if _, err := daemon.SdNotify(false, daemon.SdNotifyReady); err != nil {
 		return fmt.Errorf("failed to notify systemd: %w", err)
 	}
 
